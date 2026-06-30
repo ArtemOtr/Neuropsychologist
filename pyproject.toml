@@ -1,0 +1,23 @@
+[project]
+name = "neuropsychologist-agent"
+version = "0.1.0"
+description = "OpenAI-compatible neuropsychologist agent with hybrid RAG over Qdrant."
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "fastapi>=0.116.0",
+    "fastembed>=0.7.1",
+    "httpx>=0.28.1",
+    "langfuse>=3.2.0",
+    "openai>=1.95.0",
+    "qdrant-client>=1.15.0",
+    "sentence-transformers>=5.0.0",
+    "uvicorn[standard]>=0.35.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = false

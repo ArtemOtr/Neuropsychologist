@@ -1,7 +1,5 @@
 # Neuropsychologist Agent
 
-AI-generated
----
 
 ## 1. Контекст
 
@@ -338,14 +336,25 @@ async def index_books():
 ## 16. Запуск
 
 ```bash
-# Установка зависимостей
-pip install fastapi qdrant-client openai langfuse
+# Создать окружение под совместимую версию Python
+uv venv --python 3.12
+
+# Установить зависимости из pyproject.toml
+uv sync
 
 # Запуск сервиса
-uvicorn src.main:app --host 0.0.0.0 --port 8000
+uv run uvicorn src.main:app --host 0.0.0.0 --port 8000
 
 # Проверка health
 curl http://localhost:8000/health
+```
+
+Если `Python 3.12` ещё не установлен локально, `uv` обычно может скачать его сам:
+
+```bash
+uv python install 3.12
+uv venv --python 3.12
+uv sync
 ```
 
 ---
@@ -354,14 +363,24 @@ curl http://localhost:8000/health
 
 ```env
 # LLM
-OPENAI_API_KEY=your_key
-OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_MODEL=gpt-4o-mini
+LLM_API_KEY=your_key
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_MODEL=openai/gpt-4o-mini
 
 # Qdrant
-QDRANT_HOST=localhost
-QDRANT_PORT=6333
+QDRANT_URL=http://localhost:6333
 QDRANT_COLLECTION=khors_books
+QDRANT_DENSE_VECTOR_NAME=dense
+QDRANT_SPARSE_VECTOR_NAME=sparse
+QDRANT_FUSION=rrf
+
+# Embeddings
+EMBEDDING_MODEL_NAME=BAAI/bge-m3
+SPARSE_EMBEDDING_MODEL_NAME=Qdrant/bm25
+
+# Reranker
+RERANKER_API_BASE=http://localhost:8001
+RERANKER_MODEL=BAAI/bge-reranker-v2-m3
 
 # Langfuse
 LANGFUSE_PUBLIC_KEY=pk-...
