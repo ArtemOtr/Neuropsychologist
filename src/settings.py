@@ -84,8 +84,10 @@ class QdrantSettings:
 
 @dataclass(slots=True)
 class EmbeddingSettings:
-    model_name: str
-    local_files_only: bool
+    base_url: str
+    api_key: str
+    model: str
+    timeout: float
 
 
 @dataclass(slots=True)
@@ -156,8 +158,16 @@ class Settings:
                 fusion=os.getenv("QDRANT_FUSION", "rrf"),
             ),
             embedding=EmbeddingSettings(
-                model_name=os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3"),
-                local_files_only=_get_bool("EMBEDDING_LOCAL_FILES_ONLY", False),
+                base_url=os.getenv(
+                    "EMBEDDING_BASE_URL",
+                    os.getenv("LLM_BASE_URL", "http://localhost:4000/v1"),
+                ),
+                api_key=os.getenv(
+                    "EMBEDDING_API_KEY",
+                    os.getenv("LLM_API_KEY", ""),
+                ),
+                model=os.getenv("EMBEDDING_MODEL", "bge-m3"),
+                timeout=_get_float("EMBEDDING_TIMEOUT", 30.0),
             ),
             sparse_embedding=SparseEmbeddingSettings(
                 model_name=os.getenv("SPARSE_EMBEDDING_MODEL_NAME", "Qdrant/bm25"),

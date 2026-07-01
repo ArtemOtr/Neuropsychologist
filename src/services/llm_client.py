@@ -23,6 +23,7 @@ class LLMClient:
         self._client = AsyncOpenAI(
             base_url=settings.llm.base_url,
             api_key=settings.llm.api_key,
+            max_retries=0,
         )
 
     async def generate(

@@ -4,9 +4,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from fastembed import SparseTextEmbedding
+from openai import AsyncOpenAI
 from qdrant_client import AsyncQdrantClient, models
 from qdrant_client.models import ScoredPoint
-from sentence_transformers import SentenceTransformer
 
 from src.settings import settings
 
@@ -38,7 +38,7 @@ class RAGService:
         self,
         *,
         qdrant_client: AsyncQdrantClient | None = None,
-        dense_encoder: SentenceTransformer | None = None,
+        embedding_client: AsyncOpenAI | None = None,
         sparse_encoder: SparseTextEmbedding | None = None,
     ) -> None:
         self._qdrant = qdrant_client or AsyncQdrantClient(
@@ -46,9 +46,10 @@ class RAGService:
             api_key=settings.qdrant.api_key or None,
             timeout=settings.qdrant.timeout,
         )
-        self._dense_encoder = dense_encoder or SentenceTransformer(
-            settings.embedding.model_name,
-            local_files_only=settings.embedding.local_files_only,
+        self._embedding_client = embedding_client or AsyncOpenAI(
+            base_url=settings.embedding.base_url,
+            api_key=settings.embedding.api_key,
+            timeout=settings.embedding.timeout,
         )
         self._sparse_encoder = sparse_encoder or SparseTextEmbedding(
             model_name=settings.sparse_embedding.model_name,
@@ -70,7 +71,7 @@ class RAGService:
 
         try:
             dense_vector, sparse_vector = await asyncio.gather(
-                asyncio.to_thread(self._encode_dense, normalized_query),
+                self._encode_dense(normalized_query),
                 asyncio.to_thread(self._encode_sparse, normalized_query),
             )
             response = await self._qdrant.query_points(
@@ -96,10 +97,10 @@ class RAGService:
             raise
         except Exception as exc:
             logger.exception(
-                "Qdrant retrieval failed for collection=%s",
+                "RAG retrieval failed for collection=%s",
                 settings.qdrant.collection,
             )
-            raise RuntimeError("Failed to retrieve documents from Qdrant") from exc
+            raise RuntimeError("Failed to retrieve documents") from exc
 
         chunks: list[RetrievedChunk] = []
         for point in response.points:
@@ -108,12 +109,14 @@ class RAGService:
                 chunks.append(chunk)
         return chunks
 
-    def _encode_dense(self, query: str) -> list[float]:
-        embedding = self._dense_encoder.encode(
-            query,
-            normalize_embeddings=True,
+    async def _encode_dense(self, query: str) -> list[float]:
+        response = await self._embedding_client.embeddings.create(
+            model=settings.embedding.model,
+            input=query,
         )
-        return embedding.tolist()
+        if not response.data:
+            raise ValueError("Embedding API returned no vectors")
+        return response.data[0].embedding
 
     def _encode_sparse(self, query: str) -> models.SparseVector:
         embedding = next(iter(self._sparse_encoder.query_embed(query)))

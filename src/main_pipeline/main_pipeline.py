@@ -1,4 +1,6 @@
 import logging
+import time
+import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -26,30 +28,74 @@ _DEFAULT_ANSWER_PROMPT = (
     "и не выдумывай факты."
 )
 
+_DISABLE_THINKING = {
+    "chat_template_kwargs": {
+        "enable_thinking": False,
+    }
+}
+
 
 class MainPipeline:
     async def process(self, user_query: str) -> AsyncGenerator[str, None]:
+        request_id = uuid.uuid4().hex[:8]
+        started_at = time.perf_counter()
         normalized_query = user_query.strip()
         if not normalized_query:
             raise ValueError("user_query must not be empty")
+
+        logger.info(
+            "[pipeline:%s] Started. user_query=%r",
+            request_id,
+            normalized_query,
+        )
 
         rewrite_prompt = self._get_system_prompt(
             settings.langfuse.rewrite_prompt_name,
             fallback=_DEFAULT_REWRITE_PROMPT,
         )
+        logger.info(
+            "[pipeline:%s] Rewrite prompt loaded. response=%r",
+            request_id,
+            rewrite_prompt,
+        )
+
         rewritten_query = await llm_client.generate_text(
             messages=[
                 OpenAIMessage(role="system", content=rewrite_prompt),
                 OpenAIMessage(role="user", content=normalized_query),
             ],
+            temperature=0.1,
+            extra_body=_DISABLE_THINKING,
+        )
+        logger.info(
+            "[pipeline:%s] Query rewrite completed. response=%r",
+            request_id,
+            rewritten_query,
         )
         effective_query = rewritten_query.strip() or normalized_query
 
         retrieved_chunks = await rag_service.retrieve(effective_query)
+        logger.info(
+            "[pipeline:%s] Retrieval completed. response=%s",
+            request_id,
+            self._chunks_for_log(retrieved_chunks),
+        )
+
         reranked_chunks = await self._rerank_chunks(effective_query, retrieved_chunks)
+        logger.info(
+            "[pipeline:%s] Reranking completed. response=%s",
+            request_id,
+            self._chunks_for_log(reranked_chunks),
+        )
+
         answer_prompt = self._get_system_prompt(
             settings.langfuse.answer_prompt_name,
             fallback=_DEFAULT_ANSWER_PROMPT,
+        )
+        logger.info(
+            "[pipeline:%s] Answer prompt loaded. response=%r",
+            request_id,
+            answer_prompt,
         )
 
         final_messages = [
@@ -64,8 +110,28 @@ class MainPipeline:
             ),
         ]
 
-        async for token in llm_client.stream(messages=final_messages):
-            yield token
+        answer_parts: list[str] = []
+        try:
+            async for token in llm_client.stream(
+                messages=final_messages,
+                extra_body=_DISABLE_THINKING,
+            ):
+                answer_parts.append(token)
+                yield token
+        except Exception:
+            logger.exception(
+                "[pipeline:%s] Failed after %.3fs",
+                request_id,
+                time.perf_counter() - started_at,
+            )
+            raise
+        else:
+            logger.info(
+                "[pipeline:%s] Answer generation completed in %.3fs. response=%r",
+                request_id,
+                time.perf_counter() - started_at,
+                "".join(answer_parts),
+            )
 
     async def _rerank_chunks(
         self,
@@ -174,6 +240,21 @@ class MainPipeline:
             source = ", ".join(part for part in source_parts if part)
             formatted_chunks.append(f"[{index}] {source}\n{chunk.text}")
         return "\n\n".join(formatted_chunks)
+
+    @staticmethod
+    def _chunks_for_log(chunks: list[RetrievedChunk]) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": chunk.id,
+                "score": chunk.score,
+                "book": chunk.book,
+                "title": chunk.title,
+                "section": chunk.section,
+                "page": chunk.page,
+                "text": chunk.text,
+            }
+            for chunk in chunks
+        ]
 
 
 main_pipeline = MainPipeline()

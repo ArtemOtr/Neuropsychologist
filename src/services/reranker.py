@@ -52,8 +52,13 @@ class Reranker:
 
         try:
             response = await self._client.post(
-                f"{self._api_base}/score",
-                json={"model": self._model, "text_1": query, "text_2": docs},
+                f"{self._api_base}/rerank",
+                json={
+                    "model": self._model,
+                    "query": query,
+                    "documents": docs,
+                    "top_n": self._top_n if self._top_n > 0 else len(docs),
+                },
             )
             response.raise_for_status()
         except httpx.HTTPError as exc:
@@ -63,10 +68,10 @@ class Reranker:
         results = [
             RerankResult(
                 index=item["index"],
-                score=float(item["score"]),
+                score=float(item["relevance_score"]),
                 document=docs[item["index"]],
             )
-            for item in response.json().get("data", [])
+            for item in response.json().get("results", [])
             if 0 <= item["index"] < len(docs)
         ]
         results = [item for item in results if item.score >= self._min_score]
