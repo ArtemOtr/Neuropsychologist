@@ -39,6 +39,12 @@ def _get_float(name: str, default: float) -> float:
     return float(value) if value is not None else default
 
 
+def _get_csv(name: str, default: str) -> tuple[str, ...]:
+    value = os.getenv(name, default)
+    items = (item.strip() for item in value.split(","))
+    return tuple(dict.fromkeys(item for item in items if item))
+
+
 @dataclass(slots=True)
 class AppSettings:
     name: str
@@ -76,6 +82,7 @@ class QdrantSettings:
     api_key: str
     timeout: float
     collection: str
+    collections: tuple[str, ...]
     top_k: int
     dense_vector_name: str
     sparse_vector_name: str
@@ -152,6 +159,10 @@ class Settings:
                 api_key=os.getenv("QDRANT_API_KEY", ""),
                 timeout=_get_float("QDRANT_TIMEOUT", 30.0),
                 collection=os.getenv("QDRANT_COLLECTION", "khors_books"),
+                collections=_get_csv(
+                    "QDRANT_COLLECTIONS",
+                    os.getenv("QDRANT_COLLECTION", "khors_books"),
+                ),
                 top_k=_get_int("QDRANT_TOP_K", 5),
                 dense_vector_name=os.getenv("QDRANT_DENSE_VECTOR_NAME", "dense"),
                 sparse_vector_name=os.getenv("QDRANT_SPARSE_VECTOR_NAME", "sparse"),

@@ -5,6 +5,7 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 
 from fastembed import SparseTextEmbedding
@@ -15,15 +16,18 @@ from qdrant_client import QdrantClient, models
 from src.settings import settings
 
 
-logger = logging.getLogger("index_books")
+logger = logging.getLogger("index_qdrant")
 
 
 @dataclass(frozen=True, slots=True)
-class BookChunk:
+class DocumentChunk:
     text: str
+    collection: str
+    source_type: str
     file_name: str
-    page: int
     chunk_index: int
+    page: int | None = None
+    source_id: str | None = None
 
 
 def normalize_text(text: str) -> str:
@@ -62,10 +66,11 @@ def split_text(text: str, *, chunk_size: int, overlap: int) -> list[str]:
 def load_pdf_chunks(
     pdf_paths: list[Path],
     *,
+    collection_name: str,
     chunk_size: int,
     overlap: int,
-) -> list[BookChunk]:
-    chunks: list[BookChunk] = []
+) -> list[DocumentChunk]:
+    chunks: list[DocumentChunk] = []
     chunk_index = 0
 
     for pdf_path in pdf_paths:
@@ -78,8 +83,10 @@ def load_pdf_chunks(
                 overlap=overlap,
             ):
                 chunks.append(
-                    BookChunk(
+                    DocumentChunk(
                         text=text,
+                        collection=collection_name,
+                        source_type="book",
                         file_name=pdf_path.name,
                         page=page_number,
                         chunk_index=chunk_index,
@@ -90,9 +97,170 @@ def load_pdf_chunks(
     return chunks
 
 
-def point_id(chunk: BookChunk) -> str:
+def load_text_chunks(
+    text_paths: list[Path],
+    *,
+    collection_name: str,
+    chunk_size: int,
+    overlap: int,
+) -> list[DocumentChunk]:
+    chunks: list[DocumentChunk] = []
+    chunk_index = 0
+
+    for text_path in text_paths:
+        logger.info("Reading %s", text_path)
+        text = text_path.read_text(encoding="utf-8-sig")
+        text = re.sub(r"^\s*Чистый текст\s*", "", text, count=1)
+        for value in split_text(text, chunk_size=chunk_size, overlap=overlap):
+            chunks.append(
+                DocumentChunk(
+                    text=value,
+                    collection=collection_name,
+                    source_type="youtube_video",
+                    file_name=text_path.name,
+                    chunk_index=chunk_index,
+                )
+            )
+            chunk_index += 1
+
+    return chunks
+
+
+class TelegramExportParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.posts: list[tuple[str | None, str]] = []
+        self._div_depth = 0
+        self._message_depth: int | None = None
+        self._message_id: str | None = None
+        self._text_depth: int | None = None
+        self._text_parts: list[str] = []
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        if tag == "br" and self._text_depth is not None:
+            self._text_parts.append("\n")
+            return
+        if tag != "div":
+            return
+
+        self._div_depth += 1
+        attributes = dict(attrs)
+        classes = set((attributes.get("class") or "").split())
+        if "message" in classes and "default" in classes:
+            self._message_depth = self._div_depth
+            self._message_id = attributes.get("id")
+        elif self._message_depth is not None and "text" in classes:
+            self._text_depth = self._div_depth
+            self._text_parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._text_depth is not None:
+            self._text_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag != "div":
+            return
+
+        if self._text_depth == self._div_depth:
+            text = normalize_text("".join(self._text_parts))
+            if text:
+                self.posts.append((self._message_id, text))
+            self._text_depth = None
+            self._text_parts = []
+        if self._message_depth == self._div_depth:
+            self._message_depth = None
+            self._message_id = None
+        self._div_depth -= 1
+
+
+def load_telegram_chunks(
+    html_paths: list[Path],
+    *,
+    collection_name: str,
+    chunk_size: int,
+    overlap: int,
+) -> list[DocumentChunk]:
+    chunks: list[DocumentChunk] = []
+    chunk_index = 0
+
+    for html_path in html_paths:
+        logger.info("Reading %s", html_path)
+        parser = TelegramExportParser()
+        parser.feed(html_path.read_text(encoding="utf-8-sig"))
+        logger.info("Extracted %d posts from %s", len(parser.posts), html_path.name)
+
+        for post_id, post_text in parser.posts:
+            for value in split_text(
+                post_text,
+                chunk_size=chunk_size,
+                overlap=overlap,
+            ):
+                chunks.append(
+                    DocumentChunk(
+                        text=value,
+                        collection=collection_name,
+                        source_type="telegram_post",
+                        file_name=html_path.name,
+                        source_id=post_id,
+                        chunk_index=chunk_index,
+                    )
+                )
+                chunk_index += 1
+
+    return chunks
+
+
+def load_chunks(
+    *,
+    collection_name: str,
+    source_dir: Path,
+    chunk_size: int,
+    overlap: int,
+) -> list[DocumentChunk]:
+    if collection_name == "books":
+        paths = sorted(source_dir.glob("*.pdf"))
+        chunks = load_pdf_chunks(
+            paths,
+            collection_name=collection_name,
+            chunk_size=chunk_size,
+            overlap=overlap,
+        )
+    elif collection_name == "youtube_videos":
+        paths = sorted(source_dir.glob("*.txt"))
+        chunks = load_text_chunks(
+            paths,
+            collection_name=collection_name,
+            chunk_size=chunk_size,
+            overlap=overlap,
+        )
+    elif collection_name == "telegram_posts":
+        paths = sorted(source_dir.glob("*.html"))
+        chunks = load_telegram_chunks(
+            paths,
+            collection_name=collection_name,
+            chunk_size=chunk_size,
+            overlap=overlap,
+        )
+    else:
+        raise ValueError(f"Unsupported collection: {collection_name}")
+
+    if not paths:
+        raise FileNotFoundError(
+            f"No source files for collection '{collection_name}' in {source_dir}"
+        )
+    return chunks
+
+
+def point_id(chunk: DocumentChunk) -> str:
     digest = hashlib.sha1(chunk.text.encode("utf-8")).hexdigest()
-    value = f"{chunk.file_name}:{chunk.page}:{chunk.chunk_index}:{digest}"
+    value = (
+        f"{chunk.collection}:{chunk.file_name}:{chunk.page}:"
+        f"{chunk.source_id}:{chunk.chunk_index}:{digest}"
+    )
     return str(uuid.uuid5(uuid.NAMESPACE_URL, value))
 
 
@@ -148,19 +316,21 @@ async def embed_dense(
     return [item.embedding for item in ordered]
 
 
-async def index_books(args: argparse.Namespace) -> None:
-    pdf_paths = sorted(args.books_dir.glob("*.pdf"))
-    if not pdf_paths:
-        raise FileNotFoundError(f"No PDF files found in {args.books_dir}")
-
-    chunks = load_pdf_chunks(
-        pdf_paths,
+async def index_collection(args: argparse.Namespace) -> None:
+    source_dir = args.source_dir or Path("../qdrant-rag/data") / args.collection
+    chunks = load_chunks(
+        collection_name=args.collection,
+        source_dir=source_dir,
         chunk_size=args.chunk_size,
         overlap=args.chunk_overlap,
     )
     if not chunks:
-        raise RuntimeError("No text chunks were extracted from the PDF files")
-    logger.info("Prepared %d chunks from %d PDF files", len(chunks), len(pdf_paths))
+        raise RuntimeError(f"No text chunks were extracted from {source_dir}")
+    logger.info(
+        "Prepared %d chunks for collection %s",
+        len(chunks),
+        args.collection,
+    )
 
     embedding_client = AsyncOpenAI(
         base_url=settings.embedding.base_url,
@@ -180,7 +350,7 @@ async def index_books(args: argparse.Namespace) -> None:
     first_dense = await embed_dense(embedding_client, [chunks[0].text])
     create_collection(
         qdrant,
-        collection_name=settings.qdrant.collection,
+        collection_name=args.collection,
         vector_size=len(first_dense[0]),
         recreate=args.recreate,
     )
@@ -208,9 +378,17 @@ async def index_books(args: argparse.Namespace) -> None:
                     },
                     payload={
                         "text": chunk.text,
-                        "book": chunk.file_name,
+                        "collection": chunk.collection,
+                        "source_type": chunk.source_type,
+                        "file": chunk.file_name,
+                        "book": (
+                            chunk.file_name
+                            if chunk.source_type == "book"
+                            else None
+                        ),
                         "title": chunk.file_name,
                         "page": chunk.page,
+                        "source_id": chunk.source_id,
                         "chunk_index": chunk.chunk_index,
                     },
                 )
@@ -222,7 +400,7 @@ async def index_books(args: argparse.Namespace) -> None:
                 )
             ]
             qdrant.upsert(
-                collection_name=settings.qdrant.collection,
+                collection_name=args.collection,
                 points=points,
                 wait=True,
             )
@@ -233,17 +411,23 @@ async def index_books(args: argparse.Namespace) -> None:
 
     logger.info(
         "Collection %s is ready with %d chunks",
-        settings.qdrant.collection,
+        args.collection,
         len(chunks),
     )
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Index PDF books into Qdrant")
+    parser = argparse.ArgumentParser(description="Index sources into Qdrant")
     parser.add_argument(
+        "--collection",
+        choices=("books", "youtube_videos", "telegram_posts"),
+        default=settings.qdrant.collection,
+    )
+    parser.add_argument(
+        "--source-dir",
         "--books-dir",
+        dest="source_dir",
         type=Path,
-        default=Path("../qdrant-rag/data/books"),
     )
     parser.add_argument("--chunk-size", type=int, default=3000)
     parser.add_argument("--chunk-overlap", type=int, default=200)
@@ -257,4 +441,4 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    asyncio.run(index_books(parse_args()))
+    asyncio.run(index_collection(parse_args()))

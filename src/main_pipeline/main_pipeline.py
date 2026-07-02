@@ -14,6 +14,29 @@ from src.settings import settings
 
 logger = logging.getLogger(__name__)
 
+_QUERY_REWRITER_PARAMETERS = {
+    "temperature": 0.1,
+    "max_tokens": 1000,
+    "disable_thinking": {
+    "chat_template_kwargs": {
+        "enable_thinking": False,
+    }
+}
+}
+
+_ANSWER_GENERATION_PARAMETERS = {
+    "temperature": 0.3,
+    "max_tokens": 10000,
+    "disable_thinking": {
+        "chat_template_kwargs": {
+            "enable_thinking": False,
+        }
+    }
+}
+
+
+
+
 
 _DEFAULT_REWRITE_PROMPT = (
     "Ты переписываешь запрос пользователя для RAG-поиска по книгам Михаила Хорса. "
@@ -28,11 +51,6 @@ _DEFAULT_ANSWER_PROMPT = (
     "и не выдумывай факты."
 )
 
-_DISABLE_THINKING = {
-    "chat_template_kwargs": {
-        "enable_thinking": False,
-    }
-}
 
 
 class MainPipeline:
@@ -64,8 +82,9 @@ class MainPipeline:
                 OpenAIMessage(role="system", content=rewrite_prompt),
                 OpenAIMessage(role="user", content=normalized_query),
             ],
-            temperature=0.1,
-            extra_body=_DISABLE_THINKING,
+            max_tokens=_QUERY_REWRITER_PARAMETERS["max_tokens"],
+            temperature=_QUERY_REWRITER_PARAMETERS["temperature"],
+            extra_body=_QUERY_REWRITER_PARAMETERS["disable_thinking"],
         )
         logger.info(
             "[pipeline:%s] Query rewrite completed. response=%r",
@@ -74,7 +93,10 @@ class MainPipeline:
         )
         effective_query = rewritten_query.strip() or normalized_query
 
-        retrieved_chunks = await rag_service.retrieve(effective_query)
+        retrieved_chunks = await rag_service.retrieve_many(
+            effective_query,
+            collections=settings.qdrant.collections,
+        )
         logger.info(
             "[pipeline:%s] Retrieval completed. response=%s",
             request_id,
@@ -114,7 +136,9 @@ class MainPipeline:
         try:
             async for token in llm_client.stream(
                 messages=final_messages,
-                extra_body=_DISABLE_THINKING,
+                max_tokens=_ANSWER_GENERATION_PARAMETERS["max_tokens"],
+                temperature=_ANSWER_GENERATION_PARAMETERS["temperature"],
+                extra_body=_ANSWER_GENERATION_PARAMETERS["disable_thinking"],
             ):
                 answer_parts.append(token)
                 yield token
@@ -231,6 +255,7 @@ class MainPipeline:
         formatted_chunks: list[str] = []
         for index, chunk in enumerate(chunks, start=1):
             source_parts = [
+                f"collection={chunk.collection}" if chunk.collection else None,
                 f"book={chunk.book}" if chunk.book else None,
                 f"title={chunk.title}" if chunk.title else None,
                 f"section={chunk.section}" if chunk.section else None,
@@ -247,6 +272,7 @@ class MainPipeline:
             {
                 "id": chunk.id,
                 "score": chunk.score,
+                "collection": chunk.collection,
                 "book": chunk.book,
                 "title": chunk.title,
                 "section": chunk.section,
